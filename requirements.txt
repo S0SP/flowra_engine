@@ -7,3 +7,4 @@ celery>=5.3.0
 redis>=5.0.0
 gunicorn>=21.2.0
 pandas>=2.1.0
+cryptography>=41.0.0
