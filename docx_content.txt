@@ -1,0 +1,94 @@
+﻿Also calls syncActiveSheets() + sendPendingLeads() before processing campaigns
+/api/campaigns/process-queue exposes this as an HTTP endpoint.
+Nobody calls this endpoint automatically. The vercel.json has NO cron section.
+5B. The Engine Must Call This
+Option A (Recommended): Add a Celery Beat task to the engine that calls the frontend's /api/campaigns/process-queue endpoint:
+Option B (Better Long-Term): Port processScheduledCampaigns() fully into the Django engine as a Python Celery task, bypassing the frontend entirely, and querying Supabase directly like the rest of the engine does.
+5C. Required New Env Vars
+Add to engine's .env:
+Add to frontend's Vercel env:
+PART 6 ΓÇö CRITICAL BUGS FOUND LINE BY LINE
+Bug 1: Gemini Model String is Wrong (engine.py line 135, lead-capture.ts line 482, voice.ts line 130)
+Engine (`engine.py` line 135):
+Frontend lead-capture (`lead-capture.ts` line 482):
+Frontend voice.ts does NOT include a model string ΓÇö it uses Dograh's default.
+Problem: gemini-3.1-flash-live-preview does not exist. The correct model string for the Gemini Live API as of mid-2026 is gemini-2.0-flash-live-preview (or check Google AI Studio for the latest). A 3.1 version has not been released. Voice calls with agentType="gemini" will fail at the Dograh/Pipecat layer with a model-not-found error.
+Fix (engine.py line 135):
+Fix (lead-capture.ts line 482):
+Bug 2: requirements.txt is UTF-16 LE Corrupted (line 11)
+The raw bytes of requirements.txt line 11:
+This is eventlet>=0.33.0 written by Windows Notepad in UTF-16 LE encoding. `pip install -r requirements.txt` will fail on this line because pip reads the file as UTF-8 and sees garbage bytes.
+Fix: Open requirements.txt in VS Code or any proper editor, save as UTF-8, and ensure line 11 reads:
+Also: razorpay package is still missing. Add:
+Complete corrected requirements.txt:
+Bug 3: Engine `.env` ΓÇö DOGRAH_API_URL Points to ngrok (Dead in Production)
+ngrok free URLs are temporary and change every restart. In production on Google Cloud, this must be the actual Dograh Cloud Run URL.
+Fix: Set to real Cloud Run URL after deployment:
+Bug 4: Engine `.env` ΓÇö `DOGRAH_SECRET=change-me-in-production`
+The Dograh engine validates incoming requests using X-Flowra-Secret. The frontend sends this header from src/services/lead-capture.ts line 510 and src/services/voice.ts line 156.
+All three must agree:
+Engine .env: DOGRAH_SECRET=change-me-in-production ΓåÉ currently a placeholder
+Flowra frontend Vercel env: DOGRAH_SECRET must match
+test_voice_auth.py tests with "sumit" and "change-me-in-production" ΓÇö one of these is the real value
+Fix: Pick a strong secret, set it consistently in ALL three places before production.
+Bug 5: `ENGINE_SECRET_KEY=sumit` in engine `.env`
+The /api/execute/workflow/ endpoint in Django checks Authorization: Bearer <ENGINE_SECRET_KEY>. The frontend sends this from trigger/route.ts line 35 as process.env.DJANGO_ENGINE_SECRET.
+Currently: engine has ENGINE_SECRET_KEY=sumit. Frontend Vercel env must have DJANGO_ENGINE_SECRET=sumit.
+Fix: Change ENGINE_SECRET_KEY to a strong value, update DJANGO_ENGINE_SECRET in Vercel to match.
+Bug 6: `ALLOWED_HOSTS = ['*']` and `DEBUG = True` in settings.py
+settings.py lines 30ΓÇô32:
+The DEBUG default is 'True' ΓÇö if the env var is not explicitly set to 'False', debug mode is on in production. Django debug mode exposes full tracebacks and settings in HTTP 500 responses.
+Fix:
+Bug 7: No `STATIC_ROOT` / Whitenoise in settings.py
+For Cloud Run deployment with gunicorn, Django needs to serve static files. The admin interface (if used) requires STATIC_ROOT and whitenoise.
+Fix: Add to settings.py:
+Add whitenoise>=6.0.0 to requirements.txt.
+Bug 8: `WorkflowRunStep` Django Model Does NOT Write `workspace_id`
+execute_node() in engine.py (line 230ΓÇô236):
+workspace_id is not passed. The model has workspace_id = models.UUIDField(null=True, blank=True) ΓÇö so it defaults to null.
+The TypeScript engine writes workspace_id to every step. The frontend's /api/workflows/runs/route.ts queries steps filtered by workspace_id (via run, not steps directly), so this is OK. But the Django admin will show null workspace on all steps.
+Fix: Pass workspace_id to WorkflowRunStep.objects.create():
+Bug 9: `last_polled_at = None` is a Class Attribute, Not a Field (models.py line 100)
+This is correct Python ΓÇö it means setting.last_polled_at returns None for all instances. But if any migration tries to add this column later, it will conflict. And if any code does setting.last_polled_at = datetime.now() thinking it saves to DB, it will silently do nothing (class attribute, not instance persistence).
+No crash today, but confusing. Consider removing this entirely and adding a comment instead.
+Bug 10: Billing Model Has Wrong `managed = True` vs `False` Split
+In models.py:
+Workflow, WorkflowRun, WorkflowRunStep, Contact, LeadCaptureSetting, LeadCaptureLead, ChannelConnection, VoiceCall, Message ΓåÆ all have managed = False (unmanaged ΓÇö Django won't create/modify tables for these, because they're owned by the Supabase/frontend migrations)
+Coupon, WorkspaceSubscription, AICreditLedger, AICreditTransaction ΓåÆ have NO Meta.managed ΓåÆ defaults to True (managed ΓÇö Django WILL try to create these tables)
+This means python manage.py migrate will create the billing tables in the Supabase DB (if DB_HOST is set). This is likely intentional ΓÇö the billing tables are owned by the engine. But they need a matching Supabase migration to also exist on the frontend's schema.
+The frontend's Supabase migrations (supabase/migrations/) do NOT include coupons, workspace_subscriptions, ai_credit_ledgers, or ai_credit_transactions. If the frontend tries to query these tables via Supabase client, it will fail.
+Fix: Run python manage.py migrate after deploying the engine ΓÇö this will create the 4 billing tables in Supabase. Then add RLS policies if needed.
+PART 7 ΓÇö VERCEL CRON STATUS ΓÇö CONFIRMED ZERO
+vercel.json contents:
+There is no `crons` section. Verified by reading the file line by line. No Vercel cron jobs exist.
+What was expected to be a cron but isn't:
+/api/campaigns/process-queue ΓÇö has FLOWORA_CRON_SECRET check but no caller
+/api/workflows/trigger ΓÇö has maxDuration: 120 override but no scheduled caller
+PART 8 ΓÇö WHAT THE ENGINE HANDLES vs WHAT IT DOESN'T
+Γ£à Engine Handles (Proof-Backed)
+Γ¥î Engine Does NOT Handle (Verified Absent)
+PART 9 ΓÇö WHAT NEEDS TO BE ADDED / FIXED (PRIORITIZED)
+Priority 1: Set `DJANGO_ENGINE_URL` in Vercel (Required for Engine Routing)
+Without this env var, workflow execution NEVER reaches the engine. Set in Vercel dashboard:
+Priority 2: Fix requirements.txt Corruption
+The file has UTF-16 LE encoding on line 11. The deployment will fail. Re-save as UTF-8. Add razorpay>=1.4.0 and whitenoise>=6.0.0.
+Priority 3: Add Workflow Builder Sheet Polling to Engine
+Add poll_workflow_sheet_triggers() to engine.py and schedule it in settings.py. This closes the gap where the Workflow Builder's google_sheet trigger type has no automated polling.
+Priority 4: Add Campaign Scheduler Call to Engine
+Add a Celery task that calls POST /api/campaigns/process-queue on the frontend. This closes the gap where scheduled campaigns never execute automatically.
+Priority 5: Fix Gemini Model String
+Change "gemini-3.1-flash-live-preview" to "gemini-2.0-flash-live-preview" in:
+executor/engine.py line 135
+src/services/lead-capture.ts line 482
+Priority 6: Security Hardening
+Before any deployment:
+Priority 7: Add Missing Env Vars to Engine
+Priority 8: Add Dockerfile + Cloud Run Procfile
+The engine has no Dockerfile. Create Procfile or Dockerfile for Cloud Run:
+And a separate Cloud Run service (or job) for the Celery worker + beat:
+PART 10 ΓÇö FULL API ENDPOINT INVENTORY WITH STATUS
+Engine Endpoints (Django REST)
+Frontend Routes That Touch Background Tasks
+PART 11 ΓÇö THE TARGET ARCHITECTURE (NO VERCEL CRONS, ENGINE ONLY)
+With this, every background process runs in the engine. Vercel is 100% stateless UI + API.
+*Analysis based on line-by-line reading of: executor/engine.py (723 lines), executor/tasks.py (35 lines), executor/models.py (225 lines), executor/views.py (51 lines), executor/billing_views.py (49 lines), executor/urls.py (13 lines), executor/migrations/0001_initial.py (266 lines), flowra_engine/settings.py (162 lines), flowra_engine/celery.py (19 lines), flowra_engine/urls.py (22 lines), requirements.txt (12 lines), .env, .env.example, and frontend: src/app/api/workflows/trigger/route.ts, src/app/api/workflows/route.ts, src/app/api/workflows/runs/route.ts, src/app/api/lead-capture/route.ts, src/app/api/campaigns/process-queue/route.ts, src/app/api/jobs/workflow-step/route.ts, src/app/api/jobs/campaign-execute/route.ts, src/lib/workflow/trigger.ts (325 lines), src/lib/workflow/executor.ts (465 lines), src/services/lead-capture.ts (687 lines), src/services/scheduler.ts (172 lines), src/lib/campaign/executor.ts (184 lines), src/lib/qstash.ts (121 lines), vercel.json. No code was modified.*

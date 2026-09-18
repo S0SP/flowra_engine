@@ -2,11 +2,17 @@ import uuid
 from django.db import models
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# UNMANAGED MODELS (managed = False)
+# These mirror Supabase tables created by frontend migrations.
+# Django reads/writes them but will NOT create/drop/alter the underlying tables.
+# ─────────────────────────────────────────────────────────────────────────────
+
 class Workflow(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
     workspace_id = models.UUIDField()
-    is_active = models.BooleanField(default=True)
+    status = models.CharField(max_length=50, default='active')  # 'draft','active','paused','archived'
     trigger_type = models.CharField(max_length=100, null=True, blank=True)
     graph = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -19,12 +25,15 @@ class Workflow(models.Model):
 
 class WorkflowRun(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace_id = models.UUIDField(null=True, blank=True)
     workflow_id = models.UUIDField()
-    status = models.CharField(max_length=50, default='pending')
-    trigger_data = models.JSONField(default=dict, null=True, blank=True)
+    contact_id = models.UUIDField(null=True, blank=True)
+    status = models.CharField(max_length=50, default='running')
+    context = models.JSONField(default=dict, null=True, blank=True)
+    current_node = models.CharField(max_length=255, null=True, blank=True)
+    wake_at = models.DateTimeField(null=True, blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
-    completed_at = models.DateTimeField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         managed = False
@@ -33,15 +42,15 @@ class WorkflowRun(models.Model):
 
 class WorkflowRunStep(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace_id = models.UUIDField(null=True, blank=True)  # fixed: was missing in old create() calls
     run_id = models.UUIDField()
     node_id = models.CharField(max_length=100)
     node_type = models.CharField(max_length=100)
     status = models.CharField(max_length=50, default='pending')
-    input_data = models.JSONField(default=dict, null=True, blank=True)
-    output_data = models.JSONField(default=dict, null=True, blank=True)
-    error_message = models.TextField(null=True, blank=True)
-    started_at = models.DateTimeField(null=True, blank=True)
-    completed_at = models.DateTimeField(null=True, blank=True)
+    input = models.JSONField(default=dict, null=True, blank=True)
+    output = models.JSONField(default=dict, null=True, blank=True)
+    credits_used = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         managed = False
@@ -94,7 +103,7 @@ class LeadCaptureSetting(models.Model):
     voice_id = models.CharField(max_length=100, default='anushka')
     voice_prompt = models.TextField(null=True, blank=True)
     voice_agent_id = models.UUIDField(null=True, blank=True)
-    last_polled_at = models.DateTimeField(null=True, blank=True)
+    # last_polled_at: not stored in DB — tracked via WorkflowTriggerState instead
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -104,13 +113,18 @@ class LeadCaptureSetting(models.Model):
 
 class LeadCaptureLead(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    setting_id = models.UUIDField()
+    setting_id = models.UUIDField(db_column='lead_capture_settings_id', null=True, blank=True)
     workspace_id = models.UUIDField(null=True, blank=True)
     phone = models.CharField(max_length=50)
     email = models.EmailField(null=True, blank=True)
     name = models.CharField(max_length=255, null=True, blank=True)
-    custom_data = models.JSONField(default=dict, null=True, blank=True)
-    status = models.CharField(max_length=50, default='new')
+    row_hash = models.TextField(null=True, blank=True)
+    status = models.CharField(max_length=50, default='pending')
+    channel_status = models.JSONField(default=dict, null=True, blank=True)
+    scheduled_for = models.DateTimeField(null=True, blank=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(null=True, blank=True)
+    workflow_id = models.UUIDField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -165,3 +179,121 @@ class Message(models.Model):
         managed = False
         db_table = 'messages'
 
+
+class Campaign(models.Model):
+    """Unmanaged mirror of the frontend's 'campaigns' Supabase table."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace_id = models.UUIDField(null=True, blank=True)
+    name = models.CharField(max_length=255, null=True, blank=True)
+    status = models.CharField(max_length=50, default='draft')  # draft, scheduled, running, sent, failed, paused
+    scheduled_at = models.DateTimeField(null=True, blank=True)
+    template_name = models.CharField(max_length=255, null=True, blank=True)
+    template_language = models.CharField(max_length=50, default='en')
+    # target_filters is a JSON blob the frontend uses for contact filtering
+    target_filters = models.JSONField(default=dict, null=True, blank=True)
+    # components for template variable filling
+    components = models.JSONField(default=list, null=True, blank=True)
+    sent_count = models.IntegerField(default=0)
+    failed_count = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = 'campaigns'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MANAGED MODELS (managed = True, default)
+# These tables are owned and created by the Django engine via migrations.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WorkflowTriggerState(models.Model):
+    """
+    Engine-owned table tracking the last time each workflow's google_sheet
+    trigger was polled. Prevents duplicate processing across Celery Beat cycles.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow_id = models.UUIDField(unique=True, db_index=True)
+    last_polled_at = models.DateTimeField(null=True, blank=True)
+    rows_processed = models.IntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = True
+        db_table = 'workflow_trigger_states'
+
+
+class Coupon(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code = models.CharField(max_length=50, unique=True)
+    discount_percent = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    max_uses = models.IntegerField(default=0)  # 0 = unlimited
+    use_count = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        managed = True
+        db_table = 'coupons'
+
+    def is_valid(self):
+        from django.utils import timezone
+        if not self.is_active:
+            return False
+        if self.expires_at and self.expires_at < timezone.now():
+            return False
+        if self.max_uses > 0 and self.use_count >= self.max_uses:
+            return False
+        return True
+
+
+class WorkspaceSubscription(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace_id = models.UUIDField(unique=True, db_index=True)
+    plan_tier = models.CharField(max_length=50)  # 'starter', 'pro', 'premium'
+    billing_cycle = models.CharField(max_length=20, default='monthly')  # 'monthly', 'annual'
+    status = models.CharField(max_length=50, default='active')  # 'active', 'past_due', 'canceled'
+    razorpay_order_id = models.CharField(max_length=100, null=True, blank=True)
+    razorpay_payment_id = models.CharField(max_length=100, null=True, blank=True)
+    razorpay_customer_id = models.CharField(max_length=100, null=True, blank=True)
+    company_name = models.CharField(max_length=255, null=True, blank=True)
+    billing_address = models.TextField(null=True, blank=True)
+    gst_number = models.CharField(max_length=50, null=True, blank=True)
+    has_voice_addon = models.BooleanField(default=False)
+    ai_credits_addon = models.IntegerField(default=0)
+    amount_paid = models.IntegerField(default=0)  # in paise (INR)
+    current_period_start = models.DateTimeField(null=True, blank=True)
+    current_period_end = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = True
+        db_table = 'workspace_subscriptions'
+
+
+class AICreditLedger(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace_id = models.UUIDField(unique=True, db_index=True)
+    balance = models.IntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = True
+        db_table = 'ai_credit_ledgers'
+
+
+class AICreditTransaction(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace_id = models.UUIDField(db_index=True)
+    amount = models.IntegerField()  # Positive for grant, negative for usage
+    description = models.CharField(max_length=255)
+    reference_id = models.CharField(max_length=100, null=True, blank=True)  # Razorpay order/payment ID
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        managed = True
+        db_table = 'ai_credit_transactions'

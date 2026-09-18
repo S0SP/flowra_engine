@@ -71,7 +71,7 @@ cp .env.example .env
 
 ### 2. Run Django API Server
 ```bash
-.\venv\Scripts\python.exe manage.py runserver 0.0.0.0:8000
+.\venv\Scripts\python.exe manage.py runserver 0.0.0.0:8001
 ```
 
 ### 3. Run Celery Worker (in a separate terminal)
